@@ -500,6 +500,89 @@ duplicate points: the packer deduplicates before quantising, so two patch
 vertices a millionth apart are two points that get written as the same three
 integers. Snapping first removes them. 399,896 bytes to 357,312.
 
+### The importer leaves holes in the floor, and it is staying that way
+
+**A converted level's collision has gaps the drawn geometry does not, the cause
+is known, and the decision is not to fix it.** Written down because it was
+investigated twice -- once to find it, once to find out why -- and because the
+next person to look at `IsBuried` will otherwise conclude it is simply wrong.
+
+On df_dust2 there is no floor in a triangle of about 1.2 u² near
+(43.707, -1.561, -29.854), while `textures/dust2/-0SAND` is drawn straight
+across it. The face that should be there is a **125.6 u² sloped quad** --
+`n = (-0.243, 0.970, 0)`, corners (51.512, 0.390, -14.244), (51.512, 0.390,
+-29.854), (43.707, -1.561, -29.854), (43.707, -1.561, -14.244) -- and it is
+dropped whole by `IsBuried`. Most of it is under the upper floor at y 6.634 and
+nobody could have touched it; the sliver along one edge is not, and that sliver
+is the hole. **The visible symptom was two percent of the face that went
+missing**, which is worth remembering before sizing the next one by what can be
+seen.
+
+`IsBuried` asks nine points -- four corners and four edge midpoints, each pulled
+15% in from the rim, plus the centre, all pushed a unit along the normal -- and
+drops the face when every one of them is inside some other brush. Traced on the
+face above, all nine answer `covered`. The exposed sliver falls between them.
+The method cannot do what the comment on it promises ("dropping one that is not
+buried would leave a hole in the floor, so every sample has to agree"): nine
+points cannot decide an all-or-nothing question about an area.
+
+Two fixes were written and measured, on df_dust2, against the format's grid
+(65,535 references, and the first limit a converted level meets):
+
+| | faces | grid references |
+|---|---|---|
+| as it is | 5,568 | 23,792 (36.3%) |
+| burial by exact containment | 8,136 | 35,882 (**54.8%**) |
+| shell test per face, not per brush | 5,185 | 20,203 (30.8%) |
+| both | 7,748 | 32,243 (49.2%) |
+| **the hand-edited `.obj` that ships** | **1,904** | **11,180 (17.1%)** |
+
+- **Exact containment** is the sound answer to the burial question: a brush is
+  convex, so it contains a convex polygon if and only if it contains every one
+  of the polygon's vertices -- no sampling, nothing to fall between. It also
+  has to insist on a *single* brush, because several brushes covering nine
+  points is not evidence that their union covers the face. It closes the hole,
+  and it costs 51% more grid.
+- **The shell test** is the other half and goes the other way. A Quake level is
+  sealed in slabs of sky and caulk, and both existing tests work per *brush*:
+  `IsSky` drops a brush only when every side is sky, and the drawn-bounds test
+  only when every point of every side is outside. A slab straddling the
+  boundary survives whole. Asking the same question of each **face** -- does
+  this polygon's box overlap the drawn geometry's box at all -- removes 383
+  faces and 15% of the grid.
+
+**And the shader cannot decide it**, which is the first thing anybody will try.
+Of those 383 faces, 80 are `skies/cloudsky` and 3 are `common/caulk`; the other
+**300 carry ordinary level textures with no surface flags at all** --
+`SANDROAD`, `-0CSSANDWALL`, `SANDTRIM`, `-0SAND`, crates, a door. They are the
+outward faces and backsides of the same wall and floor brushes the playable
+level is built from. A `.bsp` keeps no record of how a brush was authored; a
+side carries a shader name and flags and nothing else. There is no marker to
+read.
+
+Why none of it is going in:
+
+- **The `.obj` flow already exists and lands four times lower.** 17.1% against
+  36.3% today and 49.2% with both fixes. The importer cannot tell which of the
+  faces nobody can reach are wanted, and the measurement says a person deleting
+  them beats both candidates by a wide margin.
+- **A barrier has no brush to come from.** The thing that actually fixed
+  MK_BLOCKFORT's and DUST2's reachable-but-wrong places is a face that stops a
+  player and lets a shot through (`metal_nobeams`), and there is nothing in a
+  `.bsp` to derive one from. It can only be authored.
+- **Right fixes, wrong direction.** Both candidates are correct and both spend
+  grid, on the one limit that decides whether a level fits at all.
+
+What to do instead, on the next converted level: export, edit, set `collision`.
+And do not expect `-mapcheck` to point at the holes. Its last section, *drawn
+surfaces with nothing solid behind them*, is the right question and it does
+sample this fault -- but it reports **the eight largest clusters of 267**, and
+the triangle above is 1.2 u², which is about five samples at half-unit spacing.
+Measured on df_dust2's derived collision, the eight it names are between 395 and
+796 samples and none of them is this. A hole small enough to walk into and not
+small enough to be seen is exactly the one that section is too coarse to
+surface, so the floor has to be looked at in a 3D tool as well.
+
 ## Checking one before it is generated
 
 ```bash
